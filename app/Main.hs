@@ -10,6 +10,7 @@ import Text.Parsec.String (Parser)
 import Text.Parsec.Token
 
 data WeakPrimary = WeakTrue | WeakFalse | WeakNull | WeakNumber String | WeakString String | Identifier String deriving (Show, Eq, Ord)
+data WeakFunction = WeakPrimary
 
 pIdentifier :: Parser WeakPrimary
 pIdentifier = do
@@ -29,18 +30,22 @@ pString = do
 
 pTrue :: Parser WeakPrimary
 pTrue = do
-  _ <- char 'T'
+  _ <- char 'T' <* notFollowedBy alphaNum
   return WeakTrue
 
 pFalse :: Parser WeakPrimary
 pFalse = do
-  _ <- char 'F'
+  _ <- char 'F' <* notFollowedBy alphaNum
   return WeakFalse
 
 pNull :: Parser WeakPrimary
 pNull = do
   _ <- char 'N'
   return WeakNull
+
+pPrimary :: Parser WeakPrimary
+pPrimary = do
+  try pTrue <|> try pFalse <|> try pNull <|> try pString <|> try pNumber <|> try pIdentifier
 
 stringify :: (Show b) => Either ParseError b -> String
 stringify x =
@@ -49,4 +54,4 @@ stringify x =
     Right b -> show b
 
 main :: IO ()
-main = putStrLn (stringify (parse pString "file.txt" "ab\\\"cd\""))
+main = putStrLn (stringify (parse pPrimary "file.txt" "T"))
