@@ -8,7 +8,7 @@ import Text.Parsec
 import Text.Parsec.Error (errorMessages, messageString)
 import Text.Parsec.Language
 import Text.Parsec.String (Parser)
-import Text.Parsec.Token
+import Text.Parsec.Token hiding (lexeme)
 import Control.Applicative (some)
 import Data.Maybe (isJust)
 import Control.Monad (when)
@@ -45,6 +45,9 @@ notA p = do
   r <- optionMaybe (lookAhead p)
   when (isJust r) $ fail ""
 
+lexeme :: Parser a -> Parser a
+lexeme p = do spaces *> p <* spaces
+
 pIdentifier :: Parser Identifier
 pIdentifier = do
   p1 <- letter <?> "Expected identifier to begin with letter"
@@ -71,61 +74,55 @@ pExpr = do
   try pTrue <|> try pFalse <|> try pNull <|> try pString <|> try pNumber <|> EIdentifier <$> pIdentifier
 
 pPrint :: Parser Stmt
-pPrint = do char 'p' *> spaces *> (Print <$> pExpr) <* char ';'
+pPrint = do char 'p' *> (Print <$> lexeme pExpr) <* char ';'
 
 pIf :: Parser Stmt
 pIf = do
-  cond <- char 'i' *> spaces *> between (char '(') (char ')') pExpr
+  cond <- lexeme (char 'i') *> between (char '(') (char ')') (lexeme pExpr)
   If cond <$> pBlock
 
 pRet :: Parser Stmt
-pRet = do char 'r' *> spaces *> (Ret <$> pExpr) <* char ';'
+pRet = do lexeme (char 'r') *> (Ret <$> lexeme pExpr) <* char ';'
 
 pExprStmt :: Parser Stmt
 pExprStmt = do
-  ExprStmt <$> pExpr <* char ';'
+  ExprStmt <$> lexeme pExpr <* char ';'
 
 pStmt :: Parser Stmt
 pStmt = do try pIf <|> try pExprStmt <|> try pPrint <|> pRet
 
 pFunDecl :: Parser Decl
 pFunDecl = do
-  void (char 'f')
-  void spaces
-  name <- pIdentifier
-  void spaces
-  args <- between (char '(') (char ')') (pIdentifier `sepBy` (spaces <* char ',' <* spaces))
+  void (lexeme (char 'f'))
+  name <- lexeme pIdentifier
+  args <- between (char '(') (char ')') (lexeme pIdentifier `sepBy` char ',')
   FunDecl name args <$> pBlock
 
 pVarDecl :: Parser Decl
 pVarDecl = do
-  void (char 'a')
-  void spaces
+  void (lexeme (char 'a'))
   name <- pIdentifier
-  void spaces
-  void (char '=')
-  void spaces
+  void (lexeme (char '='))
   value <- pExpr
-  void (char ';')
+  void (lexeme (char ';'))
   return (VarDecl name value)
 
 pOpDecl :: Parser Decl
 pOpDecl = do
-  void (char 'o')
-  void spaces
+  void (lexeme (char 'o'))
   name <- pIdentifier
-  void spaces <* char '('
+  void (lexeme (char '('))
   left <- pIdentifier
-  void spaces <* char ',' <* spaces
+  void (lexeme (char ','))
   right <- pIdentifier
-  void spaces <* char ')'
+  void (lexeme (char ')'))
   OpDecl name left right <$> pBlock
 
 pDecl :: Parser Decl
 pDecl = do (StmtDecl <$> try pStmt) <|> try pFunDecl <|> try pVarDecl <|> pOpDecl
 
 pBlock :: Parser [Decl]
-pBlock = do spaces *> char '{' *> spaces *> pDecl `sepBy` spaces <* char '}'
+pBlock = do lexeme (char '{') *> pDecl `sepBy` spaces <* lexeme (char '}')
 
 stringify :: (Show b) => Either ParseError b -> String
 stringify x =
@@ -134,4 +131,4 @@ stringify x =
     Right b -> show b
 
 main :: IO ()
-main = putStrLn (stringify (parse pDecl "file.txt" "o op(x,y){r x;}"))
+main = putStrLn (stringify (parse pDecl "file.txt" "f op(x,  y ){p    x ; aa   ;}"))
