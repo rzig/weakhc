@@ -11,6 +11,7 @@ import Text.Parsec.String (Parser)
 import Text.Parsec.Token
 import Control.Applicative (some)
 import Data.Maybe (isJust)
+import Control.Monad (when)
 
 data Identifier where
   Identifier :: String -> Identifier
@@ -39,21 +40,15 @@ data Decl
   | FunDecl Identifier [Identifier] [Decl]
   deriving (Show, Eq, Ord)
 
-neg :: Parser a -> Parser Integer
-neg p = do
+notA :: Parser a -> Parser ()
+notA p = do
   r <- optionMaybe (lookAhead p)
-  if isJust r
-    then fail ""
-    else return 1
-  -- fail ""
-  -- return (case r of
-    -- Nothing -> 1
-    -- Just _ -> (fail "not found"))
+  when (isJust r) $ fail ""
 
 pIdentifier :: Parser Identifier
 pIdentifier = do
   p1 <- letter <?> "Expected identifier to begin with letter"
-  p2 <- alphaNum `manyTill` neg alphaNum
+  p2 <- alphaNum `manyTill` notA alphaNum
   return (Identifier (p1 : p2))
 
 pNumber :: Parser Expr
@@ -93,8 +88,8 @@ pExprStmt = do
 pStmt :: Parser Stmt
 pStmt = do try pIf <|> try pExprStmt <|> try pPrint <|> pRet
 
-pFunction :: Parser Decl
-pFunction = do
+pFunDecl :: Parser Decl
+pFunDecl = do
   void (char 'f')
   void spaces
   name <- pIdentifier
@@ -102,8 +97,32 @@ pFunction = do
   args <- between (char '(') (char ')') (pIdentifier `sepBy` (spaces <* char ',' <* spaces))
   FunDecl name args <$> pBlock
 
+pVarDecl :: Parser Decl
+pVarDecl = do
+  void (char 'a')
+  void spaces
+  name <- pIdentifier
+  void spaces
+  void (char '=')
+  void spaces
+  value <- pExpr
+  void (char ';')
+  return (VarDecl name value)
+
+pOpDecl :: Parser Decl
+pOpDecl = do
+  void (char 'o')
+  void spaces
+  name <- pIdentifier
+  void spaces <* char '('
+  left <- pIdentifier
+  void spaces <* char ',' <* spaces
+  right <- pIdentifier
+  void spaces <* char ')'
+  OpDecl name left right <$> pBlock
+
 pDecl :: Parser Decl
-pDecl = do (StmtDecl <$> try pStmt) <|> try pFunction
+pDecl = do (StmtDecl <$> try pStmt) <|> try pFunDecl <|> try pVarDecl <|> pOpDecl
 
 pBlock :: Parser [Decl]
 pBlock = do spaces *> char '{' *> spaces *> pDecl `sepBy` spaces <* char '}'
@@ -115,4 +134,4 @@ stringify x =
     Right b -> show b
 
 main :: IO ()
-main = putStrLn (stringify (parse pDecl "file.txt" "f myfunc(x,y){p a;}"))
+main = putStrLn (stringify (parse pDecl "file.txt" "o op(x,y){r x;}"))
