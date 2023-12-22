@@ -1,17 +1,19 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
 
+
 module Main (main) where
 
-import Data.Functor (($>), void)
+import Control.Applicative (some)
+import Control.Monad (when)
+import Data.Functor (void, ($>))
+import Data.Maybe (isJust, fromMaybe)
 import Text.Parsec
 import Text.Parsec.Error (errorMessages, messageString)
 import Text.Parsec.Language
 import Text.Parsec.String (Parser)
 import Text.Parsec.Token hiding (lexeme)
-import Control.Applicative (some)
-import Data.Maybe (isJust)
-import Control.Monad (when)
+import Text.Parsec.Expr (buildExpressionParser, Assoc (AssocLeft))
 
 data Identifier where
   Identifier :: String -> Identifier
@@ -24,6 +26,26 @@ data Expr
   | WeakNumber String
   | WeakString String
   | EIdentifier Identifier
+  | Add Expr Expr
+  | Sub Expr Expr
+  | Mult Expr Expr
+  | Div Expr Expr
+  | Exp Expr Expr
+  | And Expr Expr
+  | Or Expr Expr
+  | Eq Expr Expr
+  | Neq Expr Expr
+  | Lt Expr Expr
+  | Gt Expr Expr
+  | MatMul Expr Expr
+  | ShapeAs Expr Expr
+  | ShapeOf Expr
+  | NegativeOf Expr
+  | NotOf Expr
+  | FunctionCall Identifier [Expr]
+  | InlineArray [Expr]
+  | ArrayAccess Expr [Expr]
+  | Assign Identifier [Expr] Expr
   deriving (Show, Eq, Ord)
 
 data Stmt
@@ -48,6 +70,12 @@ notA p = do
 lexeme :: Parser a -> Parser a
 lexeme p = do spaces *> p <* spaces
 
+inParens :: Parser a -> Parser a
+inParens = between (char '(') (char ')')
+
+inBrackets :: Parser a -> Parser a
+inBrackets = between (char '[') (char ']')
+
 pIdentifier :: Parser Identifier
 pIdentifier = do
   p1 <- letter <?> "Expected identifier to begin with letter"
@@ -69,9 +97,83 @@ pFalse = do (char 'F' <* notFollowedBy alphaNum) $> WeakFalse
 pNull :: Parser Expr
 pNull = do char 'N' $> WeakNull
 
+pPrimary :: Parser Expr
+pPrimary = do
+  try pTrue <|> try pFalse <|> try pNull <|> try pString <|> try pNumber <|> EIdentifier <$> pIdentifier <|> inParens pExpr
+
+pFunctionCall :: Parser Expr
+pFunctionCall = do
+    name <- lexeme pIdentifier
+    FunctionCall name <$> inParens (lexeme pExpr `sepBy` char ',')
+
+pFunction :: Parser Expr
+pFunction = do try pFunctionCall <|> pPrimary
+
+pDirectArrayAccess :: Parser Expr
+pDirectArrayAccess = do
+  name <- pFunction
+  indices <- inBrackets (lexeme pExpr `sepBy` char ',')
+  return (ArrayAccess name indices)
+
+pArrayAccess :: Parser Expr
+pArrayAccess = do try pDirectArrayAccess <|> pFunction
+
+pUnaryOf :: String -> (Expr -> Expr) -> Parser Expr
+pUnaryOf c e = e <$> (lexeme (string c) *> pUnary)
+
+pDirectUnary :: Parser Expr
+pDirectUnary = do try (pUnaryOf "-" NegativeOf) <|> try (pUnaryOf "!" NotOf) <|> try (pUnaryOf "s " ShapeOf)
+
+pUnary :: Parser Expr
+pUnary = do try pDirectUnary <|> pArrayAccess
+
+-- pInfix s m r = do
+  -- left <- lexeme s
+  -- void m
+  -- r left <$> lexeme s
+
+-- fold :: (a -> a -> b) -> [a] -> b
+-- fold op (x:xs) = case xs of
+  -- [] -> x
+  -- _ -> x `op` fold xs
+
+-- pFactor = do
+  -- fold (<|>) [try (pInfix pFactor (char '*') Mult)]
+pFactor :: Parser Expr
+pFactor = chainl1 (lexeme pUnary) op
+  where op = Mult <$ char '*'
+         <|> Div  <$ char '/'
+         <|> MatMul <$ char '@'
+         <|> ShapeAs <$ string "sa "
+         <|> Exp <$ char '^'
+
+pTerm :: Parser Expr
+pTerm = chainl1 (lexeme pFactor) op
+  where op = Add <$ char '+' <|> Sub <$ char '-'
+
+pComparison :: Parser Expr
+pComparison = chainl1 (lexeme pTerm) op
+  where op = Lt <$ char '<' <|> Gt <$ char '>'
+
+pEquality :: Parser Expr
+pEquality = chainl1 (lexeme pComparison) op
+  where op = Eq <$ string "==" <|> Neq <$ string "!="
+
+pLogicAnd :: Parser Expr
+pLogicAnd = chainl1 (lexeme pEquality) (And <$ (char 'A' <* notFollowedBy alphaNum))
+
+pLogicOr :: Parser Expr
+pLogicOr = chainl1 (lexeme pLogicAnd) (Or <$ (char 'O' <* notFollowedBy alphaNum))
+
+pDirectAssignment :: Parser Expr
+pDirectAssignment = do
+  v <- lexeme pIdentifier
+  args <- optionMaybe (inBrackets (pExpr `sepBy` spaces))
+  void (char '=')
+  Assign v (fromMaybe [] args) <$> lexeme pExpr
+
 pExpr :: Parser Expr
-pExpr = do
-  try pTrue <|> try pFalse <|> try pNull <|> try pString <|> try pNumber <|> EIdentifier <$> pIdentifier
+pExpr = do try pDirectAssignment <|> try pLogicOr
 
 pPrint :: Parser Stmt
 pPrint = do char 'p' *> (Print <$> lexeme pExpr) <* char ';'
@@ -131,4 +233,4 @@ stringify x =
     Right b -> show b
 
 main :: IO ()
-main = putStrLn (stringify (parse pDecl "file.txt" "f op(x,  y ){p    x ; aa   ;}"))
+main = putStrLn (stringify (parse pExpr "file.txt" "m = (3 + 4) * 2"))
