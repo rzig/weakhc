@@ -1,19 +1,18 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
 
-
 module Main (main) where
 
 import Control.Applicative (some)
 import Control.Monad (when)
 import Data.Functor (void, ($>))
-import Data.Maybe (isJust, fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Text.Parsec
 import Text.Parsec.Error (errorMessages, messageString)
+import Text.Parsec.Expr (Assoc (AssocLeft), buildExpressionParser)
 import Text.Parsec.Language
 import Text.Parsec.String (Parser)
 import Text.Parsec.Token hiding (lexeme)
-import Text.Parsec.Expr (buildExpressionParser, Assoc (AssocLeft))
 
 data Identifier where
   Identifier :: String -> Identifier
@@ -103,8 +102,8 @@ pPrimary = do
 
 pFunctionCall :: Parser Expr
 pFunctionCall = do
-    name <- lexeme pIdentifier
-    FunctionCall name <$> inParens (lexeme pExpr `sepBy` char ',')
+  name <- lexeme pIdentifier
+  FunctionCall name <$> inParens (lexeme pExpr `sepBy` char ',')
 
 pFunction :: Parser Expr
 pFunction = do try pFunctionCall <|> pPrimary
@@ -115,8 +114,13 @@ pDirectArrayAccess = do
   indices <- inBrackets (lexeme pExpr `sepBy` char ',')
   return (ArrayAccess name indices)
 
+pCreationArrayAccess :: Parser Expr
+pCreationArrayAccess = do
+  indices <- inBrackets (lexeme pExpr `sepBy` char ',')
+  return (InlineArray indices)
+
 pArrayAccess :: Parser Expr
-pArrayAccess = do try pDirectArrayAccess <|> pFunction
+pArrayAccess = do try pDirectArrayAccess <|> try pCreationArrayAccess <|> try pFunction
 
 pUnaryOf :: String -> (Expr -> Expr) -> Parser Expr
 pUnaryOf c e = e <$> (lexeme (string c) *> pUnary)
@@ -127,37 +131,30 @@ pDirectUnary = do try (pUnaryOf "-" NegativeOf) <|> try (pUnaryOf "!" NotOf) <|>
 pUnary :: Parser Expr
 pUnary = do try pDirectUnary <|> pArrayAccess
 
--- pInfix s m r = do
-  -- left <- lexeme s
-  -- void m
-  -- r left <$> lexeme s
-
--- fold :: (a -> a -> b) -> [a] -> b
--- fold op (x:xs) = case xs of
-  -- [] -> x
-  -- _ -> x `op` fold xs
-
--- pFactor = do
-  -- fold (<|>) [try (pInfix pFactor (char '*') Mult)]
 pFactor :: Parser Expr
 pFactor = chainl1 (lexeme pUnary) op
-  where op = Mult <$ char '*'
-         <|> Div  <$ char '/'
-         <|> MatMul <$ char '@'
-         <|> ShapeAs <$ string "sa "
-         <|> Exp <$ char '^'
+  where
+    op =
+      Mult <$ char '*'
+        <|> Div <$ char '/'
+        <|> MatMul <$ char '@'
+        <|> ShapeAs <$ (string "sa" <* notFollowedBy alphaNum)
+        <|> Exp <$ char '^'
 
 pTerm :: Parser Expr
 pTerm = chainl1 (lexeme pFactor) op
-  where op = Add <$ char '+' <|> Sub <$ char '-'
+  where
+    op = Add <$ char '+' <|> Sub <$ char '-'
 
 pComparison :: Parser Expr
 pComparison = chainl1 (lexeme pTerm) op
-  where op = Lt <$ char '<' <|> Gt <$ char '>'
+  where
+    op = Lt <$ char '<' <|> Gt <$ char '>'
 
 pEquality :: Parser Expr
 pEquality = chainl1 (lexeme pComparison) op
-  where op = Eq <$ string "==" <|> Neq <$ string "!="
+  where
+    op = Eq <$ string "==" <|> Neq <$ string "!="
 
 pLogicAnd :: Parser Expr
 pLogicAnd = chainl1 (lexeme pEquality) (And <$ (char 'A' <* notFollowedBy alphaNum))
@@ -233,4 +230,4 @@ stringify x =
     Right b -> show b
 
 main :: IO ()
-main = putStrLn (stringify (parse pExpr "file.txt" "m = (3 + 4) * 2"))
+main = putStrLn (stringify (parse pExpr "file.txt" "f(m)[1,2]"))
