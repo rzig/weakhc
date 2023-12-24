@@ -1,10 +1,13 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 
 module Main (main) where
 
-import Control.Applicative (some)
+import Control.Applicative (some, (<**>))
+import Control.Arrow (ArrowChoice (right), left)
 import Control.Monad (when)
+import Control.Monad.Trans.Cont
 import Data.Functor (void, ($>))
 import Data.Maybe (fromMaybe, isJust)
 import Text.Parsec
@@ -18,29 +21,20 @@ data Identifier where
   Identifier :: String -> Identifier
   deriving (Show, Eq, Ord)
 
+name :: Identifier -> String
+name (Identifier x) = x
+
+data Primitive a = WeakTrue | WeakFalse | WeakNull | WeakNumber a | WeakString a deriving (Show, Eq, Ord)
+
+data BinOpType = Add | Sub | Mult | Div | Exp | And | Or | Eq | Neq | Lt | Gt | MatMul | ShapeAs deriving (Show, Eq, Ord)
+
+data UnaryOpType = ShapeOf | NegativeOf | NotOf deriving (Show, Eq, Ord)
+
 data Expr
-  = WeakTrue
-  | WeakFalse
-  | WeakNull
-  | WeakNumber String
-  | WeakString String
+  = EPrimitive (Primitive String)
   | EIdentifier Identifier
-  | Add Expr Expr
-  | Sub Expr Expr
-  | Mult Expr Expr
-  | Div Expr Expr
-  | Exp Expr Expr
-  | And Expr Expr
-  | Or Expr Expr
-  | Eq Expr Expr
-  | Neq Expr Expr
-  | Lt Expr Expr
-  | Gt Expr Expr
-  | MatMul Expr Expr
-  | ShapeAs Expr Expr
-  | ShapeOf Expr
-  | NegativeOf Expr
-  | NotOf Expr
+  | BinOp BinOpType Expr Expr
+  | UnaryOp UnaryOpType Expr
   | FunctionCall Identifier [Expr]
   | InlineArray [Expr]
   | ArrayAccess Expr [Expr]
@@ -79,22 +73,23 @@ pIdentifier :: Parser Identifier
 pIdentifier = do
   p1 <- letter <?> "Expected identifier to begin with letter"
   p2 <- alphaNum `manyTill` notA alphaNum
-  return (Identifier (p1 : p2))
+  let iden = p1 : p2
+  if iden == "a" then fail "reserved" else return (Identifier iden)
 
 pNumber :: Parser Expr
-pNumber = do WeakNumber <$> many1 digit
+pNumber = do EPrimitive . WeakNumber <$> many1 digit
 
 pString :: Parser Expr
-pString = do WeakString <$> stringLiteral (makeTokenParser haskellDef)
+pString = do EPrimitive . WeakString <$> stringLiteral (makeTokenParser haskellDef)
 
 pTrue :: Parser Expr
-pTrue = do (char 'T' <* notFollowedBy alphaNum) $> WeakTrue
+pTrue = do (char 'T' <* notFollowedBy alphaNum) $> EPrimitive WeakTrue
 
 pFalse :: Parser Expr
-pFalse = do (char 'F' <* notFollowedBy alphaNum) $> WeakFalse
+pFalse = do (char 'F' <* notFollowedBy alphaNum) $> EPrimitive WeakFalse
 
 pNull :: Parser Expr
-pNull = do char 'N' $> WeakNull
+pNull = do char 'N' $> EPrimitive WeakNull
 
 pPrimary :: Parser Expr
 pPrimary = do
@@ -126,7 +121,7 @@ pUnaryOf :: String -> (Expr -> Expr) -> Parser Expr
 pUnaryOf c e = e <$> (lexeme (string c) *> pUnary)
 
 pDirectUnary :: Parser Expr
-pDirectUnary = do try (pUnaryOf "-" NegativeOf) <|> try (pUnaryOf "!" NotOf) <|> try (pUnaryOf "s " ShapeOf)
+pDirectUnary = do try (pUnaryOf "-" (UnaryOp NegativeOf)) <|> try (pUnaryOf "!" (UnaryOp NotOf)) <|> try (pUnaryOf "s " (UnaryOp ShapeOf))
 
 pUnary :: Parser Expr
 pUnary = do try pDirectUnary <|> pArrayAccess
@@ -135,32 +130,32 @@ pFactor :: Parser Expr
 pFactor = chainl1 (lexeme pUnary) op
   where
     op =
-      Mult <$ char '*'
-        <|> Div <$ char '/'
-        <|> MatMul <$ char '@'
-        <|> ShapeAs <$ (string "sa" <* notFollowedBy alphaNum)
-        <|> Exp <$ char '^'
+      BinOp Mult <$ char '*'
+        <|> BinOp Div <$ char '/'
+        <|> BinOp MatMul <$ char '@'
+        <|> BinOp ShapeAs <$ (string "sa" <* notFollowedBy alphaNum)
+        <|> BinOp Exp <$ char '^'
 
 pTerm :: Parser Expr
 pTerm = chainl1 (lexeme pFactor) op
   where
-    op = Add <$ char '+' <|> Sub <$ char '-'
+    op = BinOp Add <$ char '+' <|> BinOp Sub <$ char '-'
 
 pComparison :: Parser Expr
 pComparison = chainl1 (lexeme pTerm) op
   where
-    op = Lt <$ char '<' <|> Gt <$ char '>'
+    op = BinOp Lt <$ char '<' <|> BinOp Gt <$ char '>'
 
 pEquality :: Parser Expr
 pEquality = chainl1 (lexeme pComparison) op
   where
-    op = Eq <$ string "==" <|> Neq <$ string "!="
+    op = BinOp Eq <$ string "==" <|> BinOp Neq <$ string "!="
 
 pLogicAnd :: Parser Expr
-pLogicAnd = chainl1 (lexeme pEquality) (And <$ (char 'A' <* notFollowedBy alphaNum))
+pLogicAnd = chainl1 (lexeme pEquality) (BinOp And <$ (char 'A' <* notFollowedBy alphaNum))
 
 pLogicOr :: Parser Expr
-pLogicOr = chainl1 (lexeme pLogicAnd) (Or <$ (char 'O' <* notFollowedBy alphaNum))
+pLogicOr = chainl1 (lexeme pLogicAnd) (BinOp Or <$ (char 'O' <* notFollowedBy alphaNum))
 
 pDirectAssignment :: Parser Expr
 pDirectAssignment = do
@@ -223,11 +218,88 @@ pDecl = do (StmtDecl <$> try pStmt) <|> try pFunDecl <|> try pVarDecl <|> pOpDec
 pBlock :: Parser [Decl]
 pBlock = do lexeme (char '{') *> pDecl `sepBy` spaces <* lexeme (char '}')
 
+pProgram :: Parser [Decl]
+pProgram = do pDecl `sepBy` spaces
+
 stringify :: (Show b) => Either ParseError b -> String
 stringify x =
   case x of
     Left a -> show a
     Right b -> show b
 
+data Environment = Environment
+  { funcs :: [Identifier],
+    vars :: [Identifier],
+    errors :: [String]
+  }
+  deriving (Show)
+
+putError :: String -> Environment -> Environment
+putError s e = Environment (funcs e) (vars e) (errors e <> [s])
+
+putFunc :: Identifier -> Environment -> Environment
+putFunc f e = Environment (funcs e <> [f]) (vars e) (errors e)
+
+putVar :: Identifier -> Environment -> Environment
+putVar v e = Environment (funcs e) (vars e <> [v]) (errors e)
+
+addErrorsTo :: Environment -> Environment -> Environment
+addErrorsTo e e' = Environment (funcs e') (vars e') (errors e ++ errors e')
+
+withoutErrors :: Environment -> Environment
+withoutErrors e = Environment (funcs e) (vars e) []
+
+class Validatable a where
+  validate :: a -> Environment -> Cont r Environment
+
+instance Validatable Identifier where
+  validate iden e = do
+    let exists = iden `elem` vars e || iden `elem` funcs e
+    if not exists then return (putError ("Could not resolve identifier " ++ name iden) e) else return e
+
+instance Validatable Expr where
+  validate (EPrimitive _) e = do return e
+  validate (EIdentifier id) e = do validate id e
+  validate (BinOp _ l r) e = do validate l e >>= validate r
+  validate (UnaryOp _ o) e = do validate o e
+  validate (FunctionCall f []) e = do validate f e
+  validate (FunctionCall f (x : xs)) e = validate x e >>= validate (FunctionCall f xs)
+  validate (InlineArray []) e = do return e
+  validate (InlineArray (x : xs)) e = do validate x e >>= validate (InlineArray xs)
+  validate (ArrayAccess a []) e = do validate a e
+  validate (ArrayAccess a (x : xs)) e = do validate x e >>= validate (ArrayAccess a xs)
+  validate (Assign id [] r) e = do validate id e >>= validate r
+  validate (Assign id (x : xs) r) e = do validate x e >>= validate (Assign id xs r)
+
+instance Validatable Stmt where
+  validate (Print p) e = do validate p e
+  validate (If c []) e = do validate c e
+  validate (Ret v) e = do validate v e
+  validate (ExprStmt ex) e = do validate ex e
+
+instance Validatable [Decl] where
+  validate [] e = do return e
+  validate (x : xs) e = do validate x e >>= validate xs
+
+instance Validatable Decl where
+  validate (StmtDecl s) e = do validate s e
+  validate (OpDecl name lp rp body) e = do
+    x <- validate body (Environment [name] [lp, rp] [])
+    return (addErrorsTo x e)
+  validate (VarDecl l r) e = do
+    x <- validate r (withoutErrors e)
+    return (putVar l (addErrorsTo x e))
+  validate (FunDecl f p b) e = do
+    x <- validate b (Environment [f] p [])
+    return (putFunc f (addErrorsTo x e))
+
+validateAst :: [Decl] -> Environment -> Environment
+validateAst a e = runCont (validate a e) id
+
 main :: IO ()
-main = putStrLn (stringify (parse pExpr "file.txt" "f(m)[1,2]"))
+main = do
+  let code = "f g(x,y) {p x + y;} a b = 1; a c = b; g(b,c);"
+  let ast = parse pProgram "file.txt" code
+  let validated = right (\x -> validateAst x (Environment [] [] [])) ast
+  putStrLn (stringify ast)
+  putStrLn (stringify validated)
