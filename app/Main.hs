@@ -8,9 +8,10 @@ import Control.Applicative (some, (<**>))
 import Control.Arrow (ArrowChoice (right), left)
 import Control.Monad (when)
 import Control.Monad.Trans.Cont
+import Control.Monad.Trans.State
 import Data.Functor (void, ($>))
 import Data.Maybe (fromMaybe, isJust)
-import Text.Parsec
+import Text.Parsec hiding (State)
 import Text.Parsec.Error (errorMessages, messageString)
 import Text.Parsec.Expr (Assoc (AssocLeft), buildExpressionParser)
 import Text.Parsec.Language
@@ -74,7 +75,8 @@ pIdentifier = do
   p1 <- letter <?> "Expected identifier to begin with letter"
   p2 <- alphaNum `manyTill` notA alphaNum
   let iden = p1 : p2
-  if iden == "a" then fail "reserved" else return (Identifier iden)
+  let reserved = ["a", "r", "f"]
+  if iden `elem` reserved then fail "reserved" else return (Identifier iden)
 
 pNumber :: Parser Expr
 pNumber = do EPrimitive . WeakNumber <$> many1 digit
@@ -274,6 +276,7 @@ instance Validatable Expr where
 instance Validatable Stmt where
   validate (Print p) e = do validate p e
   validate (If c []) e = do validate c e
+  validate (If c (x : xs)) e = do validate x e >>= validate (If c xs)
   validate (Ret v) e = do validate v e
   validate (ExprStmt ex) e = do validate ex e
 
@@ -296,10 +299,71 @@ instance Validatable Decl where
 validateAst :: [Decl] -> Environment -> Environment
 validateAst a e = runCont (validate a e) id
 
+data ComplexBlock = ComplexBlock
+  { bid :: Integer,
+    body :: [Node]
+  }
+  deriving (Show, Eq)
+
+data Node
+  = Assignment
+      { var :: Identifier,
+        indices :: [Expr],
+        value :: Expr
+      }
+  | SimpleFunctionCall
+      { func :: Identifier,
+        params :: [Expr]
+      }
+  | PrintN Expr
+  | IfN
+      { condition :: Expr,
+        originalBody :: [Decl],
+        bodyBlock :: Integer,
+        subsequentBlock :: Integer
+      }
+  | Return Expr
+  deriving (Show, Eq)
+
+putNode :: ComplexBlock -> Node -> ComplexBlock
+putNode b n = ComplexBlock (bid b) (body b ++ [n])
+
+toBlocks :: [Decl] -> State ComplexBlock [ComplexBlock]
+toBlocks [] = do
+  b <- get
+  return [b]
+toBlocks (x : xs) = do
+  b <- get
+  case x of
+    (VarDecl varn val) -> put (putNode b (Assignment varn [] val))
+    (StmtDecl (ExprStmt (Assign varn idxs val))) -> put (putNode b (Assignment varn idxs val))
+    (StmtDecl (ExprStmt (FunctionCall f ps))) -> put (putNode b (SimpleFunctionCall f ps))
+    (StmtDecl (Print e)) -> put (putNode b (PrintN e))
+    (StmtDecl (If e body)) -> put b -- don't add the if yet, we don't know where it goes
+    (StmtDecl (Ret e)) -> put (putNode b (Return e))
+    _ -> put b
+  newb <- get
+  case x of
+    (StmtDecl (Ret e)) -> return [newb]
+    StmtDecl (If e body) -> do
+      let ifId = bid newb + 1
+      put (ComplexBlock ifId [])
+      inner <- toBlocks body
+      lastInner <- get
+      let nextBlockId = bid lastInner + 1
+      put (ComplexBlock nextBlockId [])
+      let prev = putNode b (IfN e body ifId nextBlockId)
+      remainder <- toBlocks xs
+      return ([prev] ++ inner ++ remainder)
+    _ -> toBlocks xs
+
 main :: IO ()
 main = do
-  let code = "f g(x,y) {p x + y;} a b = 1; a c = b; g(b,c);"
+  let code = "a x = 3; a y =4; i (y == x) {p 3;} a z = 5;"
   let ast = parse pProgram "file.txt" code
   let validated = right (\x -> validateAst x (Environment [] [] [])) ast
-  putStrLn (stringify ast)
-  putStrLn (stringify validated)
+  let blocked = right (\x -> evalState (toBlocks x) (ComplexBlock 0 [])) ast
+  putStrLn (stringify blocked)
+
+-- putStrLn (stringify ast)
+-- putStrLn (stringify validated)
